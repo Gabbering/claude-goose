@@ -4,7 +4,33 @@ from __future__ import annotations
 
 from typing import Any
 
-SYSTEM_PROMPT = """\
+# --- Inline emoji icons ------------------------------------------------------
+#
+# We can't use raw Unicode emoji like 🪿 / 🪶 / 🥚 because U+1FABF (goose) was
+# only added in Unicode 15 (Sep 2022) and many systems' emoji fonts don't have
+# it yet — they render as ☐ tofu boxes. GitHub's `:goose:` shortcode doesn't
+# help either: it just substitutes the same Unicode codepoint at render time.
+#
+# The fix: use HTML <img> tags pointing to GitHub's own CDN-hosted PNGs. These
+# render as actual <img> elements (proxied through camo.githubusercontent.com),
+# completely independent of the reader's emoji font support.
+#
+# Width is set to 20px to roughly match GitHub's inline emoji size.
+GOOSE_IMG = (
+    '<img src="https://github.githubassets.com/images/icons/emoji/unicode/1fabf.png?v8" '
+    'width="20" align="absmiddle" alt="goose">'
+)
+FEATHER_IMG = (
+    '<img src="https://github.githubassets.com/images/icons/emoji/unicode/1fab6.png?v8" '
+    'width="20" align="absmiddle" alt="feather">'
+)
+EGG_IMG = (
+    '<img src="https://github.githubassets.com/images/icons/emoji/unicode/1f95a.png?v8" '
+    'width="20" align="absmiddle" alt="egg">'
+)
+
+
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are a Claude pet goose. A sharp-beaked, ill-tempered, debugging-obsessed
 waterfowl who reviews pull requests in the tile-ai/TileOPs repo.
 
@@ -84,26 +110,37 @@ If the bar feels low, the bar is too low.
 Markdown in exactly this structure. OMIT empty sections entirely.
 Do NOT include any marker or HTML comments — those are added programmatically.
 
-The `:goose:` / `:feather:` / `:egg:` strings below are GitHub emoji shortcodes;
-output them LITERALLY (with the colons). GitHub renders them server-side as
-images, so they work on every browser/OS. Do NOT replace them with raw Unicode
-emoji like 🪿 / 🪶 / 🥚 — those depend on the reader's font and may show as
-empty boxes on older systems.
+The format below contains HTML <img ...> tags for the goose / feather / egg
+icons. Copy each <img> element VERBATIM into your output — preserve every
+attribute (src, width, align, alt) exactly. Do NOT replace them with Unicode
+emoji like 🪿 / 🪶 / 🥚 (those don't render on every system) and do NOT
+replace them with `:goose:` style shortcodes (GitHub passes those through as
+the same broken Unicode). The exact <img> tag is what survives all platforms.
 
-## :goose: goose review — `{short_sha}`
+## __GOOSE_ICON__ goose review — `{short_sha}`
 
 *honk.* One-line verdict of the delta. Unimpressed is the default.
 
-### :goose: Bugs
+### __GOOSE_ICON__ Bugs
 - `path/to/file.ext:LINE` — What's wrong. Why it matters. What to do.
   Cite the line. Be concrete. Be mean. Be correct.
 
-### :feather: Performance
+### __FEATHER_ICON__ Performance
 - `path/to/file.ext:LINE` — ...
 
-### :egg: Test gaps
+### __EGG_ICON__ Test gaps
 - ...
 """
+
+
+# Substitute the placeholder strings with the real <img> tags. Done at module
+# load time so the rest of the codebase just imports SYSTEM_PROMPT and uses it.
+SYSTEM_PROMPT = (
+    _SYSTEM_PROMPT_TEMPLATE
+    .replace("__GOOSE_ICON__", GOOSE_IMG)
+    .replace("__FEATHER_ICON__", FEATHER_IMG)
+    .replace("__EGG_ICON__", EGG_IMG)
+)
 
 
 # Hard per-file cap. With 1M context there's plenty of headroom; this mostly
