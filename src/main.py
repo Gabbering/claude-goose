@@ -13,8 +13,9 @@ import traceback
 
 from . import marker
 from .github_api import Comment, GitHubClient, PullRequest
+from .path_filter import is_docs_only
 from .prompt import SYSTEM_PROMPT, build_user_content
-from .reviewer import reviewer_from_env
+from .reviewer import Reviewer, reviewer_from_env
 
 # --- config (all env vars have sane defaults except the secrets) -------------
 
@@ -102,6 +103,14 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
         _log("  [skip] no files changed in delta (branch merged/rebased?)")
         return
 
+    # Plan D: docs-only short-circuit. If every file in the delta is docs/prose,
+    # don't burn an Opus call — geese don't review prose. Post (or advance) a
+    # minimal acknowledge comment so state still moves forward.
+    if is_docs_only(changed_files):
+        _log(f"  [skip-claude] docs-only delta ({len(changed_files)} file(s))")
+        _handle_docs_only(gh, pr, latest_comment, latest_marker)
+        return
+
     user_content = build_user_content(pr, old_sha, pr.head_sha, compare, first_time)
 
     # Ask the goose.
@@ -124,38 +133,49 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
         _handle_findings(gh, pr, result)
 
 
-def _handle_silent(
+def _post_or_advance_silent(
     gh: GitHubClient,
     pr: PullRequest,
     latest_comment: Comment | None,
     latest_marker: marker.Marker | None,
+    first_time_body: str,
+    log_label: str,
 ) -> None:
-    """Goose has nothing to honk about for this delta."""
+    """Shared 'no findings' state-advancement logic.
+
+    - First-time (no prior bot comment): post a minimal acknowledge comment
+      with `first_time_body` so the marker has a place to live.
+    - Subsequent: edit the latest bot comment's marker to advance state. The
+      visible body of the prior comment is left untouched (it might be real
+      findings from an earlier commit — we don't want to overwrite that).
+    """
     if latest_comment is None or latest_marker is None:
-        # First-ever review of this PR was silent. We can't advance state without
-        # posting a visible comment, so we accept one wasted Claude call per cron
-        # tick until either (a) a new commit changes head_sha, or (b) a future
-        # review finds something. In practice this is rare — most first reviews
-        # of non-trivial PRs surface at least one finding.
-        _log("  [silent] no prior bot comment; state will not advance (accepted waste)")
+        # First-time path. Post a new minimal comment with marker.
+        body = first_time_body.rstrip() + "\n\n" + marker.encode(pr.head_sha)
+        if DRY_RUN:
+            _log(f"  [{log_label}][dry-run] would post first-time ack for {pr.head_sha[:7]}")
+            return
+        try:
+            created = gh.post_issue_comment(pr.number, body)
+        except Exception as e:
+            _log(f"  [error] failed to post first-time {log_label} ack: {e}")
+            return
+        _log(f"  [{log_label}] posted first-time ack {created.get('id')} for {pr.head_sha[:7]}")
         return
 
-    # Advance the existing marker in-place. Comment body text stays the same
-    # (still shows the old findings from whenever they were first written),
-    # but the hidden marker is bumped to the current head so the next cron
-    # tick won't re-review this commit.
+    # Subsequent path. Bump marker on the existing latest bot comment, leave
+    # its body alone, append the head SHA to silent_skips for debugging.
     new_skips = list(latest_marker.silent_skips)
     skip_tag = pr.head_sha[:7].lower()
     if skip_tag not in new_skips:
         new_skips.append(skip_tag)
-    # Cap the silent_skips list — it's for debugging, not a full audit log.
-    new_skips = new_skips[-10:]
+    new_skips = new_skips[-10:]  # cap; this is debug breadcrumbs not an audit log
 
     new_marker_str = marker.encode(pr.head_sha, silent_skips=new_skips)
     new_body = marker.replace_in_body(latest_comment.body, new_marker_str)
 
     if DRY_RUN:
-        _log(f"  [silent][dry-run] would edit comment {latest_comment.id} → marker sha={pr.head_sha[:7]}")
+        _log(f"  [{log_label}][dry-run] would edit comment {latest_comment.id} → marker sha={pr.head_sha[:7]}")
         return
 
     try:
@@ -163,7 +183,32 @@ def _handle_silent(
     except Exception as e:
         _log(f"  [error] failed to edit marker on comment {latest_comment.id}: {e}")
         return
-    _log(f"  [silent] advanced marker on comment {latest_comment.id} → {pr.head_sha[:7]}")
+    _log(f"  [{log_label}] advanced marker on comment {latest_comment.id} → {pr.head_sha[:7]}")
+
+
+def _handle_silent(
+    gh: GitHubClient,
+    pr: PullRequest,
+    latest_comment: Comment | None,
+    latest_marker: marker.Marker | None,
+) -> None:
+    """Claude returned SILENT — review ran, found nothing worth honking about."""
+    body = f"🪿 *goose skimmed `{pr.head_sha[:7]}` — nothing to honk about.*"
+    _post_or_advance_silent(gh, pr, latest_comment, latest_marker, body, "silent")
+
+
+def _handle_docs_only(
+    gh: GitHubClient,
+    pr: PullRequest,
+    latest_comment: Comment | None,
+    latest_marker: marker.Marker | None,
+) -> None:
+    """Docs-only delta — Claude was never called. Post a brief honk and move on."""
+    body = (
+        f"🪿 *honk* — docs-only change. geese don't review prose. "
+        f"skipping `{pr.head_sha[:7]}`."
+    )
+    _post_or_advance_silent(gh, pr, latest_comment, latest_marker, body, "docs-only")
 
 
 def _handle_findings(gh: GitHubClient, pr: PullRequest, review_text: str) -> None:
