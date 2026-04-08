@@ -88,14 +88,14 @@ Do NOT include any marker or HTML comments — those are added programmatically.
 
 *honk.* One-line verdict of the delta. Unimpressed is the default.
 
-### 🔴 Bugs
+### 🪿 Bugs
 - `path/to/file.ext:LINE` — What's wrong. Why it matters. What to do.
   Cite the line. Be concrete. Be mean. Be correct.
 
-### 🟡 Performance
+### 🪶 Performance
 - `path/to/file.ext:LINE` — ...
 
-### 🧪 Test gaps
+### 🥚 Test gaps
 - ...
 """
 
