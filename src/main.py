@@ -14,7 +14,7 @@ import traceback
 from . import marker
 from .github_api import Comment, GitHubClient, PullRequest
 from .prompt import SYSTEM_PROMPT, build_user_content
-from .reviewer import Reviewer
+from .reviewer import reviewer_from_env
 
 # --- config (all env vars have sane defaults except the secrets) -------------
 
@@ -31,6 +31,25 @@ DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def _looks_silent(text: str) -> bool:
+    """Lenient SILENT detection — accepts SILENT / silent. / *silent* / etc.
+
+    Rule: the first non-empty line, stripped of punctuation/whitespace/markdown
+    emphasis, must equal SILENT (case-insensitive), AND the whole response must
+    be short (< 80 chars). The length cap prevents matching a real review that
+    happens to start with the word "Silent" somewhere.
+    """
+    if not text:
+        return True
+    stripped = text.strip()
+    if len(stripped) > 80:
+        return False
+    first_line = stripped.split("\n", 1)[0].strip()
+    # Strip leading/trailing markdown emphasis, punctuation, whitespace.
+    cleaned = first_line.strip("*_`~ \t.!,;:").upper()
+    return cleaned == "SILENT"
 
 
 def _find_latest_bot_marker(
@@ -97,7 +116,7 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
         _log("  [warn] empty response from Claude — treating as SILENT")
         result = "SILENT"
 
-    is_silent = result.strip().upper() == "SILENT"
+    is_silent = _looks_silent(result)
 
     if is_silent:
         _handle_silent(gh, pr, latest_comment, latest_marker)
@@ -171,18 +190,31 @@ def _handle_findings(gh: GitHubClient, pr: PullRequest, review_text: str) -> Non
 def main() -> int:
     try:
         bot_token = os.environ["BOT_PAT"]
-        anthropic_key = os.environ["ANTHROPIC_API_KEY"]
-    except KeyError as e:
-        print(f"[fatal] missing env var: {e}", file=sys.stderr)
+    except KeyError:
+        print("[fatal] missing env var: BOT_PAT", file=sys.stderr)
         return 2
 
+    # Match claude_utils.py convention: accept either ANTHROPIC_API_KEY or
+    # ANTHROPIC_AUTH_TOKEN (some proxies use the latter name).
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get(
+        "ANTHROPIC_AUTH_TOKEN"
+    )
+    if not anthropic_key:
+        print(
+            "[fatal] missing env var: ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN)",
+            file=sys.stderr,
+        )
+        return 2
+
+    base_url = os.environ.get("ANTHROPIC_BASE_URL") or "(default api.anthropic.com)"
+    model = os.environ.get("CLAUDE_MODEL") or "(default)"
     _log(
         f"claude-goose starting: repo={TARGET_REPO} author={TARGET_AUTHOR} "
-        f"bot={BOT_USERNAME} dry_run={DRY_RUN}"
+        f"bot={BOT_USERNAME} dry_run={DRY_RUN} base_url={base_url} model={model}"
     )
 
     with GitHubClient(bot_token, TARGET_REPO) as gh:
-        reviewer = Reviewer(anthropic_key)
+        reviewer = reviewer_from_env(anthropic_key)
 
         try:
             prs = gh.list_open_prs_by(TARGET_AUTHOR)
