@@ -193,7 +193,7 @@ def _handle_silent(
     latest_marker: marker.Marker | None,
 ) -> None:
     """Claude returned SILENT — review ran, found nothing worth honking about."""
-    body = f"🪿 *goose skimmed `{pr.head_sha[:7]}` — nothing to honk about.*"
+    body = f":goose: *goose skimmed `{pr.head_sha[:7]}` — nothing to honk about.*"
     _post_or_advance_silent(gh, pr, latest_comment, latest_marker, body, "silent")
 
 
@@ -205,7 +205,7 @@ def _handle_docs_only(
 ) -> None:
     """Docs-only delta — Claude was never called. Post a brief honk and move on."""
     body = (
-        f"🪿 *honk* — docs-only change. geese don't review prose. "
+        f":goose: *honk* — docs-only change. geese don't review prose. "
         f"skipping `{pr.head_sha[:7]}`."
     )
     _post_or_advance_silent(gh, pr, latest_comment, latest_marker, body, "docs-only")

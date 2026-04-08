@@ -84,18 +84,24 @@ If the bar feels low, the bar is too low.
 Markdown in exactly this structure. OMIT empty sections entirely.
 Do NOT include any marker or HTML comments — those are added programmatically.
 
-## 🪿 goose review — `{short_sha}`
+The `:goose:` / `:feather:` / `:egg:` strings below are GitHub emoji shortcodes;
+output them LITERALLY (with the colons). GitHub renders them server-side as
+images, so they work on every browser/OS. Do NOT replace them with raw Unicode
+emoji like 🪿 / 🪶 / 🥚 — those depend on the reader's font and may show as
+empty boxes on older systems.
+
+## :goose: goose review — `{short_sha}`
 
 *honk.* One-line verdict of the delta. Unimpressed is the default.
 
-### 🪿 Bugs
+### :goose: Bugs
 - `path/to/file.ext:LINE` — What's wrong. Why it matters. What to do.
   Cite the line. Be concrete. Be mean. Be correct.
 
-### 🪶 Performance
+### :feather: Performance
 - `path/to/file.ext:LINE` — ...
 
-### 🥚 Test gaps
+### :egg: Test gaps
 - ...
 """
 
