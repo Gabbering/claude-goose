@@ -23,10 +23,11 @@ class PullRequest:
 
 
 @dataclass
-class Comment:
+class Review:
     id: int
     body: str
     author: str
+    state: str  # COMMENTED / APPROVED / CHANGES_REQUESTED / DISMISSED / PENDING
 
 
 class GitHubClient:
@@ -97,28 +98,29 @@ class GitHubClient:
         r.raise_for_status()
         return r.json()
 
-    # ---------- comments ----------
+    # ---------- reviews ----------
 
-    def list_issue_comments(self, pr_number: int) -> list[Comment]:
-        """List issue comments on a PR, in chronological order (oldest first)."""
-        out: list[Comment] = []
+    def list_reviews(self, pr_number: int) -> list[Review]:
+        """List reviews on a PR, in chronological order (oldest first)."""
+        out: list[Review] = []
         page = 1
         while True:
             r = self._client.get(
-                f"/repos/{self.repo}/issues/{pr_number}/comments",
+                f"/repos/{self.repo}/pulls/{pr_number}/reviews",
                 params={"per_page": 100, "page": page},
             )
             r.raise_for_status()
             batch = r.json()
             if not batch:
                 break
-            for c in batch:
-                user = c.get("user") or {}
+            for rv in batch:
+                user = rv.get("user") or {}
                 out.append(
-                    Comment(
-                        id=c["id"],
-                        body=c.get("body") or "",
+                    Review(
+                        id=rv["id"],
+                        body=rv.get("body") or "",
                         author=user.get("login") or "",
+                        state=rv.get("state") or "",
                     )
                 )
             if len(batch) < 100:
@@ -126,17 +128,37 @@ class GitHubClient:
             page += 1
         return out
 
-    def post_issue_comment(self, pr_number: int, body: str) -> dict[str, Any]:
+    def post_review(
+        self,
+        pr_number: int,
+        body: str,
+        *,
+        commit_id: str | None = None,
+        event: str = "COMMENT",
+    ) -> dict[str, Any]:
+        """Create a PR review. event ∈ {APPROVE, REQUEST_CHANGES, COMMENT}.
+
+        We always use COMMENT — the goose isn't authorized to approve or
+        request changes; it just leaves feedback at the review level so the
+        body shows up under the GitHub Reviews API instead of as a flat
+        issue comment.
+        """
+        payload: dict[str, Any] = {"body": body, "event": event}
+        if commit_id is not None:
+            payload["commit_id"] = commit_id
         r = self._client.post(
-            f"/repos/{self.repo}/issues/{pr_number}/comments",
-            json={"body": body},
+            f"/repos/{self.repo}/pulls/{pr_number}/reviews",
+            json=payload,
         )
         r.raise_for_status()
         return r.json()
 
-    def edit_issue_comment(self, comment_id: int, body: str) -> dict[str, Any]:
-        r = self._client.patch(
-            f"/repos/{self.repo}/issues/comments/{comment_id}",
+    def update_review(
+        self, pr_number: int, review_id: int, body: str
+    ) -> dict[str, Any]:
+        """Update only the body text of an existing review (state unchanged)."""
+        r = self._client.put(
+            f"/repos/{self.repo}/pulls/{pr_number}/reviews/{review_id}",
             json={"body": body},
         )
         r.raise_for_status()

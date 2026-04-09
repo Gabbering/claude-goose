@@ -12,7 +12,7 @@ import sys
 import traceback
 
 from . import marker
-from .github_api import Comment, GitHubClient, PullRequest
+from .github_api import GitHubClient, PullRequest, Review
 from .path_filter import is_docs_only
 from .prompt import GOOSE_IMG, SYSTEM_PROMPT, build_user_content
 from .reviewer import Reviewer, reviewer_from_env
@@ -55,18 +55,18 @@ def _looks_silent(text: str) -> bool:
 
 def _find_latest_bot_marker(
     gh: GitHubClient, pr: PullRequest, bot_username: str
-) -> tuple[Comment, marker.Marker] | tuple[None, None]:
-    """Walk PR comments newest-first; return (comment, marker) of the most recent
-    bot-authored comment that carries a valid marker. None if no such comment.
+) -> tuple[Review, marker.Marker] | tuple[None, None]:
+    """Walk PR reviews newest-first; return (review, marker) of the most recent
+    bot-authored review that carries a valid marker. None if no such review.
     """
-    comments = gh.list_issue_comments(pr.number)
+    reviews = gh.list_reviews(pr.number)
     bot_lower = bot_username.lower()
-    for c in reversed(comments):
-        if c.author.lower() != bot_lower:
+    for r in reversed(reviews):
+        if r.author.lower() != bot_lower:
             continue
-        m = marker.parse(c.body)
+        m = marker.parse(r.body)
         if m is not None:
-            return c, m
+            return r, m
     return None, None
 
 
@@ -76,7 +76,7 @@ def _find_latest_bot_marker(
 def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
     _log(f"[pr #{pr.number}] {pr.title[:70]}  head={pr.head_sha[:7]}")
 
-    latest_comment, latest_marker = _find_latest_bot_marker(gh, pr, BOT_USERNAME)
+    latest_review, latest_marker = _find_latest_bot_marker(gh, pr, BOT_USERNAME)
 
     if latest_marker is not None and latest_marker.sha == pr.head_sha.lower():
         _log(f"  [skip] head {pr.head_sha[:7]} already processed (marker match)")
@@ -108,7 +108,7 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
     # minimal acknowledge comment so state still moves forward.
     if is_docs_only(changed_files):
         _log(f"  [skip-claude] docs-only delta ({len(changed_files)} file(s))")
-        _handle_docs_only(gh, pr, latest_comment, latest_marker)
+        _handle_docs_only(gh, pr, latest_review, latest_marker)
         return
 
     user_content = build_user_content(pr, old_sha, pr.head_sha, compare, first_time)
@@ -128,7 +128,7 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
     is_silent = _looks_silent(result)
 
     if is_silent:
-        _handle_silent(gh, pr, latest_comment, latest_marker)
+        _handle_silent(gh, pr, latest_review, latest_marker)
     else:
         _handle_findings(gh, pr, result)
 
@@ -136,34 +136,34 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
 def _post_or_advance_silent(
     gh: GitHubClient,
     pr: PullRequest,
-    latest_comment: Comment | None,
+    latest_review: Review | None,
     latest_marker: marker.Marker | None,
     first_time_body: str,
     log_label: str,
 ) -> None:
     """Shared 'no findings' state-advancement logic.
 
-    - First-time (no prior bot comment): post a minimal acknowledge comment
+    - First-time (no prior bot review): post a minimal acknowledge review
       with `first_time_body` so the marker has a place to live.
-    - Subsequent: edit the latest bot comment's marker to advance state. The
-      visible body of the prior comment is left untouched (it might be real
+    - Subsequent: edit the latest bot review's marker to advance state. The
+      visible body of the prior review is left untouched (it might be real
       findings from an earlier commit — we don't want to overwrite that).
     """
-    if latest_comment is None or latest_marker is None:
-        # First-time path. Post a new minimal comment with marker.
+    if latest_review is None or latest_marker is None:
+        # First-time path. Post a new minimal review with marker.
         body = first_time_body.rstrip() + "\n\n" + marker.encode(pr.head_sha)
         if DRY_RUN:
             _log(f"  [{log_label}][dry-run] would post first-time ack for {pr.head_sha[:7]}")
             return
         try:
-            created = gh.post_issue_comment(pr.number, body)
+            created = gh.post_review(pr.number, body, commit_id=pr.head_sha)
         except Exception as e:
             _log(f"  [error] failed to post first-time {log_label} ack: {e}")
             return
         _log(f"  [{log_label}] posted first-time ack {created.get('id')} for {pr.head_sha[:7]}")
         return
 
-    # Subsequent path. Bump marker on the existing latest bot comment, leave
+    # Subsequent path. Bump marker on the existing latest bot review, leave
     # its body alone, append the head SHA to silent_skips for debugging.
     new_skips = list(latest_marker.silent_skips)
     skip_tag = pr.head_sha[:7].lower()
@@ -172,35 +172,35 @@ def _post_or_advance_silent(
     new_skips = new_skips[-10:]  # cap; this is debug breadcrumbs not an audit log
 
     new_marker_str = marker.encode(pr.head_sha, silent_skips=new_skips)
-    new_body = marker.replace_in_body(latest_comment.body, new_marker_str)
+    new_body = marker.replace_in_body(latest_review.body, new_marker_str)
 
     if DRY_RUN:
-        _log(f"  [{log_label}][dry-run] would edit comment {latest_comment.id} → marker sha={pr.head_sha[:7]}")
+        _log(f"  [{log_label}][dry-run] would edit review {latest_review.id} → marker sha={pr.head_sha[:7]}")
         return
 
     try:
-        gh.edit_issue_comment(latest_comment.id, new_body)
+        gh.update_review(pr.number, latest_review.id, new_body)
     except Exception as e:
-        _log(f"  [error] failed to edit marker on comment {latest_comment.id}: {e}")
+        _log(f"  [error] failed to edit marker on review {latest_review.id}: {e}")
         return
-    _log(f"  [{log_label}] advanced marker on comment {latest_comment.id} → {pr.head_sha[:7]}")
+    _log(f"  [{log_label}] advanced marker on review {latest_review.id} → {pr.head_sha[:7]}")
 
 
 def _handle_silent(
     gh: GitHubClient,
     pr: PullRequest,
-    latest_comment: Comment | None,
+    latest_review: Review | None,
     latest_marker: marker.Marker | None,
 ) -> None:
     """Claude returned SILENT — review ran, found nothing worth honking about."""
     body = f"{GOOSE_IMG} *goose skimmed `{pr.head_sha[:7]}` — nothing to honk about.*"
-    _post_or_advance_silent(gh, pr, latest_comment, latest_marker, body, "silent")
+    _post_or_advance_silent(gh, pr, latest_review, latest_marker, body, "silent")
 
 
 def _handle_docs_only(
     gh: GitHubClient,
     pr: PullRequest,
-    latest_comment: Comment | None,
+    latest_review: Review | None,
     latest_marker: marker.Marker | None,
 ) -> None:
     """Docs-only delta — Claude was never called. Post a brief honk and move on."""
@@ -208,25 +208,25 @@ def _handle_docs_only(
         f"{GOOSE_IMG} *honk* — docs-only change. geese don't review prose. "
         f"skipping `{pr.head_sha[:7]}`."
     )
-    _post_or_advance_silent(gh, pr, latest_comment, latest_marker, body, "docs-only")
+    _post_or_advance_silent(gh, pr, latest_review, latest_marker, body, "docs-only")
 
 
 def _handle_findings(gh: GitHubClient, pr: PullRequest, review_text: str) -> None:
-    """Goose found something worth honking about — post a new comment."""
+    """Goose found something worth honking about — post a new review."""
     new_marker_str = marker.encode(pr.head_sha)
     body = review_text.rstrip() + "\n\n" + new_marker_str
 
     if DRY_RUN:
-        _log(f"  [post][dry-run] would post new comment for {pr.head_sha[:7]}:")
+        _log(f"  [post][dry-run] would post new review for {pr.head_sha[:7]}:")
         _log("  " + "\n  ".join(body.splitlines()[:12]))
         return
 
     try:
-        created = gh.post_issue_comment(pr.number, body)
+        created = gh.post_review(pr.number, body, commit_id=pr.head_sha)
     except Exception as e:
-        _log(f"  [error] failed to post comment: {e}")
+        _log(f"  [error] failed to post review: {e}")
         return
-    _log(f"  [post] created comment {created.get('id')} for head {pr.head_sha[:7]}")
+    _log(f"  [post] created review {created.get('id')} for head {pr.head_sha[:7]}")
 
 
 # --- entrypoint --------------------------------------------------------------
