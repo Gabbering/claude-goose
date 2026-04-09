@@ -69,3 +69,16 @@ def replace_in_body(body: str, new_marker: str) -> str:
         # Use a lambda to avoid backreference interpretation of `\` in new_marker.
         return _MARKER_RE.sub(lambda _m: new_marker, body, count=1)
     return body.rstrip() + "\n\n" + new_marker
+
+
+def strip_from_body(body: str) -> str:
+    """Remove any marker HTML comment from `body` for display purposes.
+
+    Used when feeding the bot's own past reviews back into Claude as
+    conversation context — the marker is internal state and would just be
+    noise. Multiple markers (shouldn't happen, but be defensive) are all
+    removed. Trailing whitespace from the gap is also cleaned up.
+    """
+    if not body:
+        return body
+    return _MARKER_RE.sub("", body).rstrip()

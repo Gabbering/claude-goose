@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -28,6 +29,35 @@ class Review:
     body: str
     author: str
     state: str  # COMMENTED / APPROVED / CHANGES_REQUESTED / DISMISSED / PENDING
+    submitted_at: str  # ISO8601, "" if pending
+
+
+@dataclass
+class IssueComment:
+    """A top-level conversation comment on a PR (the 'Conversation' tab)."""
+
+    id: int
+    body: str
+    author: str
+    created_at: str  # ISO8601
+
+
+@dataclass
+class ReviewComment:
+    """An inline review comment attached to a specific line in a file.
+
+    These form review threads via in_reply_to_id — root comments have it as
+    None, replies point at the parent comment.
+    """
+
+    id: int
+    body: str
+    author: str
+    path: str
+    line: int | None  # None when GitHub couldn't anchor it (outdated diff)
+    diff_hunk: str
+    in_reply_to_id: int | None
+    created_at: str
 
 
 class GitHubClient:
@@ -121,12 +151,116 @@ class GitHubClient:
                         body=rv.get("body") or "",
                         author=user.get("login") or "",
                         state=rv.get("state") or "",
+                        submitted_at=rv.get("submitted_at") or "",
                     )
                 )
             if len(batch) < 100:
                 break
             page += 1
         return out
+
+    # ---------- conversation: issue comments + inline review comments ----------
+
+    def list_issue_comments(self, pr_number: int) -> list[IssueComment]:
+        """List top-level conversation comments on a PR (oldest first).
+
+        These are the 'Conversation' tab comments — distinct from review
+        bodies (`list_reviews`) and inline review comments
+        (`list_review_comments`). The author may use any of the three to
+        respond to feedback, so the goose needs all three to understand
+        what's been said.
+        """
+        out: list[IssueComment] = []
+        page = 1
+        while True:
+            r = self._client.get(
+                f"/repos/{self.repo}/issues/{pr_number}/comments",
+                params={"per_page": 100, "page": page},
+            )
+            r.raise_for_status()
+            batch = r.json()
+            if not batch:
+                break
+            for c in batch:
+                user = c.get("user") or {}
+                out.append(
+                    IssueComment(
+                        id=c["id"],
+                        body=c.get("body") or "",
+                        author=user.get("login") or "",
+                        created_at=c.get("created_at") or "",
+                    )
+                )
+            if len(batch) < 100:
+                break
+            page += 1
+        return out
+
+    def list_review_comments(self, pr_number: int) -> list[ReviewComment]:
+        """List inline review comments (line-anchored, threaded) oldest-first.
+
+        These come from /pulls/{n}/comments — they are the line-level
+        discussion threads that hang off specific lines in the diff.
+        """
+        out: list[ReviewComment] = []
+        page = 1
+        while True:
+            r = self._client.get(
+                f"/repos/{self.repo}/pulls/{pr_number}/comments",
+                params={"per_page": 100, "page": page},
+            )
+            r.raise_for_status()
+            batch = r.json()
+            if not batch:
+                break
+            for c in batch:
+                user = c.get("user") or {}
+                # GitHub returns `line` (current diff line) and falls back to
+                # `original_line` for outdated threads. Prefer line, fall back.
+                line = c.get("line")
+                if line is None:
+                    line = c.get("original_line")
+                out.append(
+                    ReviewComment(
+                        id=c["id"],
+                        body=c.get("body") or "",
+                        author=user.get("login") or "",
+                        path=c.get("path") or "",
+                        line=line,
+                        diff_hunk=c.get("diff_hunk") or "",
+                        in_reply_to_id=c.get("in_reply_to_id"),
+                        created_at=c.get("created_at") or "",
+                    )
+                )
+            if len(batch) < 100:
+                break
+            page += 1
+        return out
+
+    # ---------- file contents at a specific ref ----------
+
+    def get_file_content(self, path: str, ref: str) -> str | None:
+        """Fetch raw text content of a file at a given ref. None on miss/binary.
+
+        Uses the contents API with the raw media type so we get the bytes
+        directly instead of base64-wrapped JSON. Returns None for 404,
+        binary content (octet-stream), or any other failure — the caller
+        treats absence as 'no full-file context for this file'.
+        """
+        try:
+            r = self._client.get(
+                f"/repos/{self.repo}/contents/{quote(path, safe='/')}",
+                params={"ref": ref},
+                headers={"Accept": "application/vnd.github.raw"},
+            )
+        except httpx.HTTPError:
+            return None
+        if r.status_code != 200:
+            return None
+        ct = r.headers.get("Content-Type", "")
+        if "octet-stream" in ct:
+            return None
+        return r.text
 
     def post_review(
         self,

@@ -17,6 +17,10 @@ from .path_filter import is_docs_only
 from .prompt import GOOSE_IMG, SYSTEM_PROMPT, build_user_content
 from .reviewer import Reviewer, reviewer_from_env
 
+# Hard cap on full file content fetched per file. Mirrors the cap in prompt.py
+# but we apply it pre-fetch as a sanity check too.
+_MAX_FULL_FILE_BYTES = 200_000
+
 # --- config (all env vars have sane defaults except the secrets) -------------
 
 TARGET_REPO = os.environ.get("TARGET_REPO", "tile-ai/TileOPs")
@@ -54,12 +58,14 @@ def _looks_silent(text: str) -> bool:
 
 
 def _find_latest_bot_marker(
-    gh: GitHubClient, pr: PullRequest, bot_username: str
+    reviews: list[Review], bot_username: str
 ) -> tuple[Review, marker.Marker] | tuple[None, None]:
-    """Walk PR reviews newest-first; return (review, marker) of the most recent
-    bot-authored review that carries a valid marker. None if no such review.
+    """Walk a pre-fetched reviews list newest-first; return (review, marker)
+    of the most recent bot-authored review that carries a valid marker.
+
+    Pure function — takes the reviews list directly so callers can fetch once
+    and reuse the result for both marker tracking and conversation context.
     """
-    reviews = gh.list_reviews(pr.number)
     bot_lower = bot_username.lower()
     for r in reversed(reviews):
         if r.author.lower() != bot_lower:
@@ -76,7 +82,14 @@ def _find_latest_bot_marker(
 def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
     _log(f"[pr #{pr.number}] {pr.title[:70]}  head={pr.head_sha[:7]}")
 
-    latest_review, latest_marker = _find_latest_bot_marker(gh, pr, BOT_USERNAME)
+    # Fetch reviews ONCE — used both for marker tracking and as context.
+    try:
+        all_reviews = gh.list_reviews(pr.number)
+    except Exception as e:
+        _log(f"  [error] list_reviews failed: {e}")
+        return
+
+    latest_review, latest_marker = _find_latest_bot_marker(all_reviews, BOT_USERNAME)
 
     if latest_marker is not None and latest_marker.sha == pr.head_sha.lower():
         _log(f"  [skip] head {pr.head_sha[:7]} already processed (marker match)")
@@ -111,7 +124,72 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
         _handle_docs_only(gh, pr, latest_review, latest_marker)
         return
 
-    user_content = build_user_content(pr, old_sha, pr.head_sha, compare, first_time)
+    # Fetch the rest of the conversation context — issue comments + inline
+    # review threads. Failures are non-fatal: degrade to "no context" rather
+    # than skipping the PR entirely.
+    try:
+        issue_comments = gh.list_issue_comments(pr.number)
+    except Exception as e:
+        _log(f"  [warn] list_issue_comments failed, continuing without: {e}")
+        issue_comments = []
+    try:
+        review_comments = gh.list_review_comments(pr.number)
+    except Exception as e:
+        _log(f"  [warn] list_review_comments failed, continuing without: {e}")
+        review_comments = []
+
+    bot_lower = BOT_USERNAME.lower()
+    other_reviews = [r for r in all_reviews if r.author.lower() != bot_lower]
+    own_reviews = [r for r in all_reviews if r.author.lower() == bot_lower]
+
+    # Fetch full file content at HEAD for each file the goose can usefully
+    # see surrounding context for. Skip added files (diff already IS the
+    # entire file) and removed files (nothing at head). Best-effort: any
+    # individual fetch failure just drops that file from the context map.
+    full_files: dict[str, str] = {}
+    for f in changed_files:
+        status = f.get("status") or ""
+        if status in ("added", "removed"):
+            continue
+        path = f.get("filename") or ""
+        if not path:
+            continue
+        try:
+            content = gh.get_file_content(path, pr.head_sha)
+        except Exception as e:
+            _log(f"  [warn] get_file_content({path}) failed: {e}")
+            continue
+        if content is None:
+            continue
+        if len(content) > _MAX_FULL_FILE_BYTES:
+            _log(
+                f"  [warn] {path} full content {len(content)}B > "
+                f"{_MAX_FULL_FILE_BYTES}B cap, omitting"
+            )
+            continue
+        full_files[path] = content
+
+    _log(
+        f"  [context] {len(issue_comments)} issue comment(s), "
+        f"{len(other_reviews)} other review(s), "
+        f"{len(own_reviews)} own review(s), "
+        f"{len(review_comments)} inline comment(s), "
+        f"{len(full_files)} full file(s)"
+    )
+
+    user_content = build_user_content(
+        pr,
+        old_sha,
+        pr.head_sha,
+        compare,
+        first_time,
+        bot_username=BOT_USERNAME,
+        issue_comments=issue_comments,
+        other_reviews=other_reviews,
+        own_reviews=own_reviews,
+        review_comments=review_comments,
+        full_files=full_files,
+    )
 
     # Ask the goose.
     try:

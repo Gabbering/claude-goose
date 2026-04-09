@@ -86,3 +86,29 @@ def test_roundtrip_through_replace_preserves_skips() -> None:
     assert m is not None
     assert m.sha == "abc1234"
     assert m.silent_skips == ["01dbeef"]
+
+
+def test_strip_from_body_removes_marker() -> None:
+    body = "## findings\n\nbroken null check at file.cu:42\n\n<!-- ga-bot:v1 sha=abc1234 -->"
+    stripped = marker.strip_from_body(body)
+    assert "ga-bot" not in stripped
+    assert "sha=" not in stripped
+    assert stripped.startswith("## findings")
+    assert stripped.endswith("file.cu:42")  # trailing blank-line + marker gone
+
+
+def test_strip_from_body_no_marker_is_noop() -> None:
+    body = "just a comment with no marker"
+    assert marker.strip_from_body(body) == body
+
+
+def test_strip_from_body_handles_empty() -> None:
+    assert marker.strip_from_body("") == ""
+
+
+def test_strip_from_body_with_skips() -> None:
+    body = "honk\n<!-- ga-bot:v1 sha=deadbee silent_skips=111aaaa,222bbbb -->"
+    stripped = marker.strip_from_body(body)
+    assert "ga-bot" not in stripped
+    assert "silent_skips" not in stripped
+    assert stripped == "honk"
