@@ -121,7 +121,7 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
     # minimal acknowledge comment so state still moves forward.
     if is_docs_only(changed_files):
         _log(f"  [skip-claude] docs-only delta ({len(changed_files)} file(s))")
-        _handle_docs_only(gh, pr, latest_review, latest_marker)
+        _handle_docs_only(gh, pr)
         return
 
     # Fetch the rest of the conversation context — issue comments + inline
@@ -206,7 +206,7 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
     is_silent = _looks_silent(result)
 
     if is_silent:
-        _handle_silent(gh, pr, latest_review, latest_marker)
+        _handle_silent(gh, pr)
     else:
         _handle_findings(gh, pr, result)
 
@@ -214,79 +214,39 @@ def process_pr(gh: GitHubClient, reviewer: Reviewer, pr: PullRequest) -> None:
 def _post_or_advance_silent(
     gh: GitHubClient,
     pr: PullRequest,
-    latest_review: Review | None,
-    latest_marker: marker.Marker | None,
     first_time_body: str,
     log_label: str,
 ) -> None:
     """Shared 'no findings' state-advancement logic.
 
-    - First-time (no prior bot review): post a minimal acknowledge review
-      with `first_time_body` so the marker has a place to live.
-    - Subsequent: edit the latest bot review's marker to advance state. The
-      visible body of the prior review is left untouched (it might be real
-      findings from an earlier commit — we don't want to overwrite that).
+    Always posts a new review with `first_time_body` + marker. GitHub does not
+    allow editing submitted reviews, so we never attempt update_review here.
     """
-    if latest_review is None or latest_marker is None:
-        # First-time path. Post a new minimal review with marker.
-        body = first_time_body.rstrip() + "\n\n" + marker.encode(pr.head_sha)
-        if DRY_RUN:
-            _log(f"  [{log_label}][dry-run] would post first-time ack for {pr.head_sha[:7]}")
-            return
-        try:
-            created = gh.post_review(pr.number, body, commit_id=pr.head_sha)
-        except Exception as e:
-            _log(f"  [error] failed to post first-time {log_label} ack: {e}")
-            return
-        _log(f"  [{log_label}] posted first-time ack {created.get('id')} for {pr.head_sha[:7]}")
-        return
-
-    # Subsequent path. Bump marker on the existing latest bot review, leave
-    # its body alone, append the head SHA to silent_skips for debugging.
-    new_skips = list(latest_marker.silent_skips)
-    skip_tag = pr.head_sha[:7].lower()
-    if skip_tag not in new_skips:
-        new_skips.append(skip_tag)
-    new_skips = new_skips[-10:]  # cap; this is debug breadcrumbs not an audit log
-
-    new_marker_str = marker.encode(pr.head_sha, silent_skips=new_skips)
-    new_body = marker.replace_in_body(latest_review.body, new_marker_str)
-
+    body = first_time_body.rstrip() + "\n\n" + marker.encode(pr.head_sha)
     if DRY_RUN:
-        _log(f"  [{log_label}][dry-run] would edit review {latest_review.id} → marker sha={pr.head_sha[:7]}")
+        _log(f"  [{log_label}][dry-run] would post ack for {pr.head_sha[:7]}")
         return
-
     try:
-        gh.update_review(pr.number, latest_review.id, new_body)
+        created = gh.post_review(pr.number, body, commit_id=pr.head_sha)
     except Exception as e:
-        _log(f"  [error] failed to edit marker on review {latest_review.id}: {e}")
+        _log(f"  [error] failed to post {log_label} ack: {e}")
         return
-    _log(f"  [{log_label}] advanced marker on review {latest_review.id} → {pr.head_sha[:7]}")
+    _log(f"  [{log_label}] posted ack {created.get('id')} for {pr.head_sha[:7]}")
 
 
-def _handle_silent(
-    gh: GitHubClient,
-    pr: PullRequest,
-    latest_review: Review | None,
-    latest_marker: marker.Marker | None,
-) -> None:
+def _handle_silent(gh: GitHubClient, pr: PullRequest) -> None:
     """Claude returned SILENT — review ran, found nothing worth honking about."""
     body = f"{GOOSE_IMG} *goose skimmed `{pr.head_sha[:7]}` — nothing to honk about.*"
-    _post_or_advance_silent(gh, pr, latest_review, latest_marker, body, "silent")
+    _post_or_advance_silent(gh, pr, body, "silent")
 
 
-def _handle_docs_only(
-    gh: GitHubClient,
-    pr: PullRequest,
-    latest_review: Review | None,
-    latest_marker: marker.Marker | None,
-) -> None:
+def _handle_docs_only(gh: GitHubClient, pr: PullRequest) -> None:
     """Docs-only delta — Claude was never called. Post a brief honk and move on."""
     body = (
         f"{GOOSE_IMG} *honk* — docs-only change. geese don't review prose. "
         f"skipping `{pr.head_sha[:7]}`."
     )
-    _post_or_advance_silent(gh, pr, latest_review, latest_marker, body, "docs-only")
+    _post_or_advance_silent(gh, pr, body, "docs-only")
 
 
 def _handle_findings(gh: GitHubClient, pr: PullRequest, review_text: str) -> None:
